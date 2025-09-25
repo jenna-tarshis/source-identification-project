@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+
+  postgres-main:
+    container_name: sims-postgres-main
+    image: postgres:13.4-alpine
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-q", "-d", "postgres", "-U", "${POSTGRES_SUPER_USER:-postgres}" ]
+      timeout: 45s
+      interval: 10s
+      retries: 10
+    restart: always
+    environment:
+      - POSTGRES_USER=${POSTGRES_SUPER_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_SUPER_PASS:-asdf;lkj}
+      - APP_DB_USER=${APP_DB_USER:-docker}
+      - APP_DB_PASS=${APP_DB_PASS:-docker}
+      - APP_DB_NAME=${APP_DB_NAME:-sims}
+    volumes:
+      - ./utils/docker-entrypoint-postgres-main.sh:/docker-entrypoint-initdb.d/docker-entrypoint.sh
+#      - ./utils/db:/var/lib/postgresql  # for persisting export files if needed
+    ports:
+      - ${POSTGRES_MAIN_PORT:-5434}:5432
+    networks:
+      - default

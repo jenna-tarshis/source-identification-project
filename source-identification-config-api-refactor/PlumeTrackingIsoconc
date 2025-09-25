@@ -1,0 +1,165 @@
+# PlumeTrackingIsoconc.py
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+plt.ion()
+
+# import grouped events object from CompareSensorsEVA.py
+import pickle
+with open("grouped_events.pkl", "rb") as f:
+    grouped_events = pickle.load(f)
+
+from analysis_utils import *
+from config import *
+
+event_id = "E1"
+event_data = grouped_events[event_id]
+sensor_ids = list(event_data.keys())
+ref_sensor = sensor_ids[0]  # Pick first sensor in the event
+ref_path = facility_sensors["AltEn"]["May25June22"][ref_sensor]
+#------------------------------------
+# 3D plot of plane through 3 sensors, shows plane and projection of gradient vector
+# inspired planar_analysis_V1.py
+#------------------------------------
+
+#----------------------------------------------------------------------------------------------
+# --- Choose event and a reference sensor ---
+event_id = "E1"
+event_data = grouped_events[event_id]
+sensor_ids = list(event_data.keys())
+ref_sensor = sensor_ids[0]  # Pick first sensor in the event
+ref_path = facility_sensors["AltEn"]["May25June22"][ref_sensor]
+
+# --- Extract reference coordinates from file ---
+lat_ref, lon_ref = get_sensor_position(ref_path)
+#-----------------------------------------------------------------------------------------------
+
+# ***** NEW CODE: Define positions_m for all sensors *****
+positions_m = {}
+for sensor_ID, path in facility_sensors["AltEn"]["May25June22"].items():
+    lat, lon = get_sensor_position(path)
+    x, y = latlon_to_meters(lat, lon, lat_ref, lon_ref)
+    positions_m[sensor_ID] = (x, y)
+# **********************************************************
+
+# Iterate through all events
+for event_ID, seg_info in grouped_events.items():
+    print(f"\nProcessing {event_ID}...")
+
+    # Get reference concentration: first PM value of the first sensor in the event
+    first_sensor = next(iter(seg_info))
+    ref_df = seg_info[first_sensor]
+    ref_conc = ref_df["PM-2.5"].iloc[0]
+    print(f"  Reference concentration: {ref_conc:.4f} µg/m³")
+
+    sensor_times = []
+    for sensor_ID, df in seg_info.items():
+        # Find first time this sensor reaches the reference concentration (or closest above)
+        match = df[df["PM-2.5"] >= ref_conc]
+        if not match.empty:
+            arrival_time = match["Datetime"].iloc[0]
+            time_seconds = (arrival_time - df["Datetime"].iloc[0]).total_seconds()
+            sensor_times.append((sensor_ID, *positions_m[sensor_ID], time_seconds))
+            print(f"    {sensor_ID} reached {ref_conc:.4f} at {arrival_time} (+{time_seconds:.1f}s)")
+        else:
+            print(f"    {sensor_ID} never reached {ref_conc:.4f}")
+            sensor_times.append((sensor_ID, *positions_m[sensor_ID], np.nan))
+
+    # sensor_times is a list of tuples like:  (sensor_ID, x, y, z)
+    x_vals = np.array([x for _, x, _, _ in sensor_times])
+    y_vals = np.array([y for _, _, y, _ in sensor_times])
+    z_vals = np.array([z for _, _, _, z in sensor_times])
+
+    # Define z_offset before it's used
+    z_offset = min(z_vals) - 20
+
+    # Create a new 3D plot for each event
+    fig = plt.figure()
+    ax = fig.add_subplot(projection='3d')
+
+    # Extract valid points (ignore NaNs)
+    valid_points = [(x, y, z) for _, x, y, z in sensor_times if not np.isnan(z)]
+    if len(valid_points) == 3:
+        xs_valid, ys_valid, zs_valid = zip(*valid_points)
+        ax.plot_trisurf(xs_valid, ys_valid, zs_valid, color='gray', alpha=0.3, edgecolor='black')
+
+        # Plot triangle edges explicitly
+        triangle = np.array(valid_points + [valid_points[0]])  # loop back to start
+        ax.plot(triangle[:,0], triangle[:,1], triangle[:,2], color='blue')
+
+        # Project triangle to xy-plane
+        xy_triangle = np.array([(x, y, z_offset) for x, y, _ in valid_points] + [(valid_points[0][0], valid_points[0][1], z_offset)])
+        ax.plot(xy_triangle[:,0], xy_triangle[:,1], xy_triangle[:,2], color='black', linestyle='dotted')
+
+         # Add dashed lines from each 3D point to its projection
+        for (x, y, z) in valid_points:
+            ax.plot([x, x], [y, y], [z, z_offset], linestyle='dashed', color='green', alpha=0.5)
+
+        # Mark points explicitly
+        for sensor_ID, x, y, z in sensor_times:
+            if not np.isnan(z):
+                ax.scatter(x, y, z, color='red', s=25)
+                ax.text(x, y, z, sensor_ID, fontsize=8, ha='right')
+
+    # Create meshgrid around the triangle bounds
+    xs = np.linspace(min(x_vals) - 1, max(x_vals) + 1, 30)
+    ys = np.linspace(min(y_vals) - 1, max(y_vals) + 1, 30)
+    xs, ys = np.meshgrid(xs, ys)
+
+    # Fit the plane Z = ax + by + c
+    X = np.array([[x, y, 1] for x, y in zip(x_vals, y_vals)])
+    Z = np.array(z_vals)
+    coeffs, _, _, _ = np.linalg.lstsq(X, Z, rcond=None)
+    a, b, c = coeffs
+    zs = a * xs + b * ys + c
+
+    # define normal vector from scalar equation and plot at each pt
+    normal_vector = [a, b, c]
+    scale = 100
+    # Normalize the normal vector
+    #normal_vector = np.array([a, b, c])
+    #normal_vector = normal_vector / np.linalg.norm(normal_vector)
+    # Project normal vector onto XY-plane
+    normal_xy = np.array([a, b])
+    norm_xy_mag = np.linalg.norm(normal_xy)
+
+    # Only plot if it has direction (i.e., not a flat plane)
+    #if norm_xy_mag > 0:
+    normal_xy_unit = normal_xy / norm_xy_mag
+
+    # Get triangle centroid in XY
+    centroid_x = np.mean(x_vals)
+    centroid_y = np.mean(y_vals)
+
+    # Plot projected normal vector in XY plane
+    ax.quiver(
+        centroid_x, centroid_y, z_offset,
+        normal_xy_unit[0]*scale, normal_xy_unit[1]*scale, 0,
+        color='purple', linewidth=2, arrow_length_ratio=0.1
+    )
+
+    print(normal_vector)
+
+    # Plot the 3D surface (the plane)
+    ax.plot_surface(xs, ys, zs, alpha=0.3, edgecolor='gray', linewidth=0.5)
+
+    # Project contours onto each wall
+    x_offset = min(x_vals) - 1
+    y_offset = max(y_vals) + 1
+
+    # Adjust axes limits to fit projections
+    ax.set_xlim(x_offset, max(x_vals) + 1)
+    ax.set_ylim(min(y_vals) - 1, y_offset)
+    ax.set_zlim(z_offset, max(z_vals) + 20)
+
+    ax.set_title(f"{event_ID} – Sensor Time to Reach {ref_conc:.2f} µg/m³")
+    ax.set_xlabel('X Position')
+    ax.set_ylabel('Y Position')
+    ax.set_zlabel('Time Since Sensor Start (s)')
+    ax.grid(True)
+
+plt.ioff()
+plt.show()
+
